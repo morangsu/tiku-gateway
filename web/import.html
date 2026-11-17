@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>导入答案</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+  <h1>导入答案</h1>
+  <nav>
+    <a href="/">总览</a>
+    <a href="/export">导出</a>
+    <a href="/import" class="on">导入</a>
+    <a href="/review">复核</a>
+    <a href="/sources">票源</a>
+  </nav>
+</header>
+<main>
+  <div class="banner warn">
+    每个框可以粘<b>多个批次的回复</b>（解析器会自动认出所有 JSON 数组）。同一个 AI 的不同会话请分开放，
+    它们是<b>不同的票</b>。所有框只认本轮题号，粘上一轮的内容会被拒。
+  </div>
+  <div id="sources"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let sources = [];
+
+async function api(p, o) {
+  const r = await fetch(p, o);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+
+const sid = (s) => s.replace(/[^a-z0-9]/gi, '-');
+const nKey = (id) => 'tiku.sessions.' + id;
+
+function sessionCount(id) {
+  return Math.max(1, Number(localStorage.getItem(nKey(id)) || 1));
+}
+function setSessionCount(id, n) {
+  localStorage.setItem(nKey(id), String(n));
+}
+
+async function boot() {
+  sources = (await api('/api/sources')).filter((s) => s.kind === 'web' && s.enabled !== false);
+  render();
+}
+
+function render() {
+  $('sources').innerHTML = sources.map((s) => {
+    const n = sessionCount(s.id);
+    const boxes = Array.from({ length: n }, (_, i) => `
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3>${s.label} · 会话 #${i + 1}</h3>
+          <div class="row">
+            <button class="primary" onclick="doImport('${s.id}', ${i + 1}, '${sid(s.id)}-${i + 1}', this)">解析导入</button>
+            <span id="r-${sid(s.id)}-${i + 1}" class="muted"></span>
+          </div>
+        </div>
+        <textarea id="ta-${sid(s.id)}-${i + 1}" placeholder="把 ${s.label} 的回复整段粘进来（多批可以一起粘）"></textarea>
+      </div>`).join('');
+    return `<div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <h2 style="margin:0">${s.label}</h2>
+        <div class="row">
+          <span class="muted">权重 ${s.weight ?? 1}</span>
+          <button class="ghost" onclick="addSession('${s.id}')">+ 新增会话</button>
+        </div>
+      </div>
+      ${boxes}
+    </div>`;
+  }).join('');
+}
+
+function addSession(id) {
+  setSessionCount(id, sessionCount(id) + 1);
+  render();
+}
+
+async function doImport(sourceId, session, key, btn) {
+  const ta = document.getElementById('ta-' + key);
+  const out = document.getElementById('r-' + key);
+  const raw = ta.value.trim();
+  if (!raw) return (out.textContent = '内容为空');
+  btn.disabled = true;
+  out.textContent = '解析中…';
+  const r = await api('/api/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceId, session, raw }),
+  });
+  btn.disabled = false;
+  if (r.error) {
+    out.innerHTML = `<span class="tag bad">失败</span> ${r.error}`;
+    return;
+  }
+  const parts = [`<span class="tag ok">应用 ${r.applied}</span>`];
+  if (r.batches?.length > 1) parts.push(`<span class="tag">${r.batches.length} 段</span>`);
+  if (r.missingCount) parts.push(`<span class="tag warn">缺 ${r.missingCount} 题</span>`);
+  if (r.rejected?.length) parts.push(`<span class="tag bad">拒 ${r.rejected.length}</span>`);
+  out.innerHTML = parts.join(' ');
+  out.title = JSON.stringify(r, null, 2);
+  if (r.rejected?.length) {
+    const box = document.createElement('pre');
+    box.textContent = r.rejected.map((x) => `#${x.i} ${x.reason}`).join('\n');
+    ta.parentElement.appendChild(box);
+  }
+  if (!r.missingCount && !r.rejected?.length) ta.value = '';
+}
+
+boot();
+</script>
+</body>
+</html>

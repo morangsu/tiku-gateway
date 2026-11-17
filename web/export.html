@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>导出题目</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+  <h1>导出题目</h1>
+  <nav>
+    <a href="/">总览</a>
+    <a href="/export" class="on">导出</a>
+    <a href="/import">导入</a>
+    <a href="/review">复核</a>
+    <a href="/sources">票源</a>
+  </nav>
+</header>
+<main>
+  <div class="panel">
+    <h2>题型</h2>
+    <div class="row" id="types"><span class="muted">加载中…</span></div>
+  </div>
+
+  <div class="panel">
+    <h2>批次</h2>
+    <div class="row">
+      <button onclick="step(-1)">上一批</button>
+      <span id="batchInfo" class="muted">—</span>
+      <button onclick="step(1)">下一批</button>
+      <label class="muted" style="margin-left:12px">每批题数</label>
+      <input type="number" id="size" value="20" min="5" max="40" style="width:80px" onchange="load()" />
+      <span class="muted" id="progress"></span>
+    </div>
+  </div>
+
+  <div id="cards"></div>
+
+  <div class="panel">
+    <h2>使用顺序</h2>
+    <ol class="muted" style="margin:0;padding-left:18px">
+      <li>每张卡片点「复制」，粘到对应 AI 的对话框（五家拿到的是同一份题，保证投票公平）</li>
+      <li>AI 回复后，去「导入」页，把各自回复粘进对应票源的会话框</li>
+      <li>题目题干已预处理：去掉了「(单选题, 2.0分)」这类后缀和题号</li>
+    </ol>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let round = null;
+let sources = [];
+let type = 'single';
+let batch = 0;
+let last = null;
+const copied = new Set();
+
+async function api(p, o) {
+  const r = await fetch(p, o);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+
+async function boot() {
+  round = await api('/api/round');
+  sources = (await api('/api/sources')).filter((s) => s.kind === 'web');
+
+  if (!round.total) {
+    $('types').innerHTML = '<span class="muted">本轮还没有题目，回总览点「开始新一轮」</span>';
+    $('cards').innerHTML = '';
+    return;
+  }
+  const entries = Object.entries(round.byType);
+  type = entries[0]?.[0] || 'single';
+  $('types').innerHTML = entries
+    .map(([t, n]) => `<button class="ghost" data-t="${t}" onclick="pick('${t}')">${t} <span class="muted">${round.done?.[t] || 0}/${n}</span></button>`)
+    .join(' ');
+  markType();
+  load();
+}
+
+function markType() {
+  document.querySelectorAll('#types button').forEach((b) => {
+    b.className = b.dataset.t === type ? 'primary' : 'ghost';
+  });
+}
+
+function pick(t) {
+  type = t;
+  batch = 0;
+  markType();
+  load();
+}
+
+function step(d) {
+  const n = (last?.totalBatches || 1);
+  batch = Math.max(0, Math.min(n - 1, batch + d));
+  load();
+}
+
+async function load() {
+  const size = $('size').value || 20;
+  const r = await api(`/api/prompt?type=${encodeURIComponent(type)}&batch=${batch}&size=${size}`);
+  if (r.error) {
+    $('cards').innerHTML = `<div class="banner warn">${r.error}</div>`;
+    $('batchInfo').textContent = '—';
+    return;
+  }
+  if (r.empty) {
+    $('cards').innerHTML = `<div class="banner warn">这个题型在本轮没有题</div>`;
+    return;
+  }
+  const data = { ...r };
+  if (data.from !== undefined) {
+    // 兼容：/api/prompt 直接返回单批
+  }
+  last = data;
+  $('batchInfo').textContent = `第 ${r.batch + 1}/${r.totalBatches} 批 · 题号 ${r.from}–${r.to} · ${r.count} 题`;
+  $('progress').textContent = '';
+
+  $('cards').innerHTML = sources.map((s) => `
+    <div class="panel">
+      <div class="row" style="justify-content:space-between">
+        <div><b>${s.label}</b> <span class="muted">· ${r.count} 题 · 题号 ${r.from}–${r.to}</span></div>
+        <div class="row">
+          <button class="primary" onclick="copyPrompt('${s.id}', this)">复制</button>
+          <span id="st-${cssid(s.id)}" class="muted"></span>
+        </div>
+      </div>
+      <details style="margin-top:8px"><summary class="muted">展开查看内容</summary><pre>${esc(r.prompt)}</pre></details>
+    </div>`).join('');
+
+  window.__prompt = r.prompt;
+  window.__ids = r.ids;
+}
+
+function cssid(s) { return s.replace(/[^a-z0-9]/gi, '-'); }
+function esc(s) { return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+async function copyPrompt(id, btn) {
+  try {
+    await navigator.clipboard.writeText(window.__prompt);
+    btn.textContent = '已复制 ✓';
+    setTimeout(() => (btn.textContent = '复制'), 1500);
+    const st = document.getElementById('st-' + cssid(id));
+    if (st) st.textContent = '已复制，去粘贴';
+    // 记录"这一批这批模型已经复制过"，仅本地提示用
+    copied.add(id + ':' + type + ':' + batch);
+    localStorage.setItem('tiku.copied', JSON.stringify([...copied]));
+  } catch (e) {
+    alert('复制失败：' + e.message + '\n（可以展开后手动全选复制）');
+  }
+}
+
+boot();
+</script>
+</body>
+</html>

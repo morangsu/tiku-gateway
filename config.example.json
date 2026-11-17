@@ -1,0 +1,27 @@
+{
+  "_说明": "复制本文件为 data/config.json 即可初始化。所有密钥都不在这里——ZError token 和各 API key 通过网页界面填写，单独存到 data/keys.json（已被 .gitignore 排除，永不上传）。",
+  "port": 8321,
+  "course": "default",
+  "mode": "auto",
+  "threshold": 0.6666666666666666,
+  "similarity": 0.85,
+  "ambiguousPolicy": "blank",
+  "zerror": {
+    "enabled": true,
+    "mode": "zlast",
+    "trustAI": false,
+    "remaining": null,
+    "refillThreshold": 20,
+    "used": 0,
+    "base": "https://api.zaizhexue.top/api/query"
+  },
+  "sources": [
+    { "id": "web:deepseek", "kind": "web", "label": "DeepSeek", "model": "", "weight": 1, "enabled": true, "sessions": 1 },
+    { "id": "web:doubao", "kind": "web", "label": "豆包", "model": "", "weight": 1, "enabled": true, "sessions": 1 },
+    { "id": "web:kimi", "kind": "web", "label": "Kimi", "model": "", "weight": 1, "enabled": true, "sessions": 1 },
+    { "id": "web:zhipu", "kind": "web", "label": "智谱清言", "model": "", "weight": 1, "enabled": true, "sessions": 1 },
+    { "id": "web:qwen", "kind": "web", "label": "通义", "model": "", "weight": 1, "enabled": true, "sessions": 1 },
+    { "id": "zerror", "kind": "zerror", "label": "ZError", "model": "", "weight": 1, "enabled": true, "sessions": 1 }
+  ],
+  "prompt": { "batchSize": 20, "maxTitleChars": 500 }
+}

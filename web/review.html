@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>人工复核</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+  <h1>人工复核</h1>
+  <nav>
+    <a href="/">总览</a>
+    <a href="/export">导出</a>
+    <a href="/import">导入</a>
+    <a href="/review" class="on">复核</a>
+    <a href="/sources">票源</a>
+  </nav>
+</header>
+<main>
+  <div class="row" style="margin-bottom:12px">
+    <button onclick="load('pending')">只看未解</button>
+    <button onclick="load('all')">全部</button>
+    <span class="muted" id="info"></span>
+  </div>
+  <div id="list"></div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const sid = (s) => s.replace(/[^a-z0-9]/gi, '-');
+
+async function api(p, o) {
+  const r = await fetch(p, o);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+
+async function load(only) {
+  $('info').textContent = '加载中…';
+  const r = await api('/api/review?only=' + only + '&limit=30');
+  $('info').textContent = `共 ${r.total} 道，显示前 ${r.items.length}`;
+  $('list').innerHTML = r.items.map(card).join('') || '<div class="banner warn">没有需要复核的题</div>';
+}
+
+function card(it) {
+  const k = sid(it.hash).slice(0, 12);
+  const slots = it.slots || [];
+  const blankCount = Math.max(1, ...slots.map((s) => s.slot || 0));
+
+  const voteRow = (slot, groups) =>
+    groups.length
+      ? groups.map((g) => `<span class="chip ${g.sources.includes('manual') ? 'top' : ''}" onclick="adopt('${it.hash}','${k}',${slot},${JSON.stringify(String(g.raw)).replace(/"/g, '&quot;')})">${esc(g.raw || '(空)')} <span class="muted">${g.weight}票·${g.sources.join(',')}</span></span>`).join(' ')
+      : '<span class="muted">这一空没有任何票</span>';
+
+  let body = '';
+  if (it.type === 'completion' || it.type === 'completion_choice' || it.type === 'short_answer') {
+    body = `<div class="muted" style="margin:8px 0 4px">按空填写（共 ${blankCount} 空）</div>` +
+      Array.from({ length: blankCount }, (_, i) => {
+        const s = slots.find((x) => x.slot === i + 1);
+        return `<div style="margin-bottom:8px">
+          <div class="row"><span class="muted">第 ${i + 1} 空</span>
+            <input type="text" id="in-${k}-${i + 1}" style="flex:1;min-width:200px" /></div>
+          <div class="row" style="margin-top:5px">${voteRow(i + 1, s?.groups || [])}</div>
+        </div>`;
+      }).join('');
+  } else {
+    const multi = it.type === 'multiple';
+    body = `<div class="muted" style="margin:8px 0 4px">${multi ? '多选，可点多个' : '点击选择'}：</div>` +
+      it.options.map((o, i) => `<button class="opt" id="op-${k}-${i}" onclick="pick('${k}',${i},${multi})">${'ABCDEFGHIJ'[i]}. ${esc(o)}</button>`).join('') +
+      `<div class="row" style="margin-top:8px">${voteRow(0, slots.find((s) => s.slot === 0)?.groups || [])}</div>`;
+  }
+
+  return `<div class="panel" data-type="${it.type}" data-hash="${it.hash}" id="c-${k}">
+    <div class="row" style="justify-content:space-between">
+      <div><span class="tag">${it.type}</span> ${it.resolved ? '<span class="tag ok">已解</span>' : '<span class="tag warn">待定</span>'}
+        ${it.reason ? `<span class="tag">${it.reason}</span>` : ''}</div>
+      <div class="row">
+        <button class="primary" onclick="save('${k}','${it.hash}',${blankCount},${JSON.stringify(it.options).replace(/"/g, '&quot;')})">保存</button>
+        <span id="r-${k}" class="muted"></span>
+      </div>
+    </div>
+    <div style="margin-top:8px;font-weight:500">${esc(it.title)}</div>
+    ${body}
+  </div>`;
+}
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+function pick(k, i, multi) {
+  const el = document.getElementById(`op-${k}-${i}`);
+  if (multi) el.classList.toggle('sel');
+  else {
+    document.querySelectorAll(`[id^="op-${k}-"]`).forEach((b) => b.classList.remove('sel'));
+    el.classList.add('sel');
+  }
+}
+
+function adopt(hash, k, slot, text) {
+  const card = document.getElementById('c-' + k);
+  if (!card) return;
+  if (card.dataset.type === 'completion' || card.dataset.type === 'completion_choice' || card.dataset.type === 'short_answer') {
+    const input = document.getElementById(`in-${k}-${slot}`);
+    if (input) input.value = text;
+    return;
+  }
+  const options = JSON.parse(card.querySelector('.opt') ? '[]' : '[]');
+  // 文本 → 选项按钮（按文本匹配）
+  const btns = [...card.querySelectorAll('.opt')];
+  const target = btns.find((b) => b.textContent.replace(/^[A-J]\.\s*/, '').trim() === String(text).trim());
+  if (!target) return;
+  if (card.dataset.type === 'multiple') target.classList.add('sel');
+  else btns.forEach((b) => b.classList.remove('sel')), target.classList.add('sel');
+}
+
+async function save(k, hash, blankCount, options) {
+  const card = document.getElementById('c-' + k);
+  const type = card.dataset.type;
+  const out = document.getElementById('r-' + k);
+  let slots = [];
+
+  if (type === 'completion' || type === 'completion_choice' || type === 'short_answer') {
+    for (let i = 1; i <= blankCount; i++) {
+      const v = document.getElementById('in-' + k + '-' + i).value.trim();
+      if (v) slots.push({ slot: i, text: v });
+    }
+  } else {
+    const sel = [...card.querySelectorAll('.opt.sel')].map((b) => b.textContent.replace(/^[A-J]\.\s*/, '').trim());
+    if (!sel.length) return (out.textContent = '先选一个选项');
+    if (type === 'multiple') {
+      slots.push({ slot: 0, text: sel.join(' | ') });
+    } else {
+      slots.push({ slot: 0, text: sel[0] });
+    }
+  }
+  if (!slots.length) return (out.textContent = '没有内容可保存');
+
+  const r = await api('/api/decide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hash, slots }),
+  });
+  if (r.ok) {
+    out.innerHTML = '<span class="tag ok">已保存</span>';
+    card.style.opacity = '.55';
+  } else {
+    out.textContent = r.error || '失败';
+  }
+}
+
+load('pending');
+</script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "tiku-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "本地答题网关：多源投票 + 人工裁决 + 乱序免疫题库",
+  "scripts": {
+    "start": "node --experimental-sqlite src/gateway.mjs",
+    "start:json": "node src/gateway.mjs",
+    "test": "node src/selftest.mjs"
+  }
+}

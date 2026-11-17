@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Tiku Gateway Panel",
+  "version": "1.0.0",
+  "description": "本地答题网关侧边栏：导出题目给 AI、导入回复、复核争议题。",
+  "permissions": ["sidePanel", "storage"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "题库网关面板", "default_icon": "icon.png" },
+  "side_panel": { "default_path": "panel.html" },
+  "icons": { "128": "icon.png" },
+  "minimum_chrome_version": "114"
+}

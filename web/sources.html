@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>票源</title>
+<link rel="stylesheet" href="/app.css" />
+<style>
+  .api-card { border-left: 3px solid var(--accent); }
+  .field { display: flex; flex-direction: column; gap: 3px; min-width: 200px; flex: 1; }
+  .field label { font-size: 12px; color: var(--muted); }
+  .field input, .field textarea, .field select { width: 100%; }
+  .grid2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  details summary { cursor: pointer; color: var(--accent); font-size: 12px; }
+  .keybox { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>票源</h1>
+  <nav>
+    <a href="/">总览</a>
+    <a href="/export">导出</a>
+    <a href="/import">导入</a>
+    <a href="/review">复核</a>
+    <a href="/sources" class="on">票源</a>
+  </nav>
+</header>
+<main>
+  <div class="panel">
+    <h2>① 网页版 AI（复制粘贴，免费）</h2>
+    <div id="webList"></div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="newWebId" placeholder="票源 id，例如 web:glm" style="width:200px" />
+      <input type="text" id="newWebLabel" placeholder="显示名" style="width:180px" />
+      <button onclick="addWeb()">新增网页票源</button>
+    </div>
+    <p class="muted" style="margin:8px 0 0">这些源不联网请求：导出页复制题目 → 网页 AI 问完 → 导入页粘回来。权重 0 = 不参与投票。</p>
+  </div>
+
+  <div class="panel">
+    <h2>② 自定义 API（服务端直连，不用来回复制）</h2>
+    <p class="muted" style="margin:0 0 10px">
+      填好 URL / 方法 / 请求头 / body / 答案路径，网关直接请求、解析、计票。<b>只有填了必填项且启用的源才参与</b>。
+      <b>每个源的 key 单独存</b>在 <span class="mono">data/keys.json</span>，不写进配置，分享配置不会泄露密钥。
+    </p>
+    <div id="apiList"></div>
+    <div class="row" style="margin-top:10px">
+      <select id="preset" style="width:220px">
+        <option value="">— 从预设模板新建 —</option>
+        <option value="deepseek">DeepSeek（OpenAI 兼容）</option>
+        <option value="openai">OpenAI 兼容通用</option>
+        <option value="zhipu">智谱 GLM（OpenAI 兼容）</option>
+        <option value="dashscope">阿里通义（DashScope 兼容）</option>
+        <option value="custom">空白自定义</option>
+      </select>
+      <button onclick="addApiFromPreset()">新建 API 票源</button>
+      <button class="primary" onclick="save()">保存全部</button>
+      <button onclick="pullApis()">立即拉取未解题</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>③ ZError（题库，按次计费）</h2>
+    <div class="row">
+      <label class="muted">策略</label>
+      <select id="zmode">
+        <option value="zlast">zlast：只查分歧题（省次数，推荐）</option>
+        <option value="zfirst">zfirst：每题都查</option>
+        <option value="off">off：不用 ZError</option>
+      </select>
+      <label class="muted"><input type="checkbox" id="zai" /> 信任 ai:true 的答案</label>
+      <label class="muted">低于</label>
+      <input type="number" id="zrefill" style="width:70px" />
+      <span class="muted">次时提醒去领免费次数</span>
+      <button class="primary" onclick="save()">保存</button>
+    </div>
+    <p class="muted" style="margin:10px 0 0">ZError 的 token 现在也存独立密钥文件，请到<b>总览页</b>填写。响应里没有剩余次数字段（已实测），只能本地记账 + 手动校准。</p>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let cfg = null;
+let keyState = { zerror: { set:false, preview:'' }, api: {} };
+
+async function api(p, o) {
+  const r = await fetch(p, o);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+
+async function boot() {
+  cfg = await api('/api/config');
+  keyState = await api('/api/keys');
+  render();
+}
+
+const PRESETS = {
+  deepseek: {
+    label: 'DeepSeek API',
+    spec: {
+      url: 'https://api.deepseek.com/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      authHeader: 'Authorization', authValue: 'Bearer {{key}}',
+      body: '{"model":"deepseek-chat","temperature":0,"messages":[{"role":"user","content":"{{prompt|json}}"}]}',
+      answerPath: 'choices.0.message.content', format: 'rows', batchSize: 20,
+    },
+  },
+  openai: {
+    label: 'OpenAI 兼容 API',
+    spec: {
+      url: 'https://api.openai.com/v1/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      authHeader: 'Authorization', authValue: 'Bearer {{key}}',
+      body: '{"model":"gpt-4o-mini","temperature":0,"messages":[{"role":"user","content":"{{prompt|json}}"}]}',
+      answerPath: 'choices.0.message.content', format: 'rows', batchSize: 20,
+    },
+  },
+  zhipu: {
+    label: '智谱 GLM API',
+    spec: {
+      url: 'https://open.bigmodel.cn/api/paas/v4/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      authHeader: 'Authorization', authValue: 'Bearer {{key}}',
+      body: '{"model":"glm-4-flash","temperature":0,"messages":[{"role":"user","content":"{{prompt|json}}"}]}',
+      answerPath: 'choices.0.message.content', format: 'rows', batchSize: 20,
+    },
+  },
+  dashscope: {
+    label: '通义千问 API',
+    spec: {
+      url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions', method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      authHeader: 'Authorization', authValue: 'Bearer {{key}}',
+      body: '{"model":"qwen-plus","temperature":0,"messages":[{"role":"user","content":"{{prompt|json}}"}]}',
+      answerPath: 'choices.0.message.content', format: 'rows', batchSize: 20,
+    },
+  },
+  custom: {
+    label: '自定义 API',
+    spec: {
+      url: '', method: 'POST', headers: { 'Content-Type': 'application/json' },
+      authHeader: 'Authorization', authValue: 'Bearer {{key}}',
+      body: '{"messages":[{"role":"user","content":"{{prompt|json}}"}]}',
+      answerPath: 'choices.0.message.content', format: 'rows', batchSize: 20,
+    },
+  },
+};
+
+function newId(prefix) {
+  let n = 1;
+  while (cfg.sources.some((s) => s.id === `${prefix}${n}`)) n++;
+  return `${prefix}${n}`;
+}
+
+function render() {
+  // 网页票源
+  $('webList').innerHTML = cfg.sources.map((s, i) => s.kind === 'api' || s.kind === 'zerror' ? '' : `
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div class="row"><b>${esc(s.label)}</b><span class="tag">${esc(s.id)}</span></div>
+        <div class="row">
+          <label class="muted">权重</label>
+          <input type="number" step="0.1" min="0" max="5" value="${s.weight ?? 1}" style="width:70px" onchange="upd(${i},'weight',Number(this.value))" />
+          <label class="muted"><input type="checkbox" ${s.enabled !== false ? 'checked' : ''} onchange="upd(${i},'enabled',this.checked)" /> 启用</label>
+          <button class="ghost" onclick="del(${i})">删除</button>
+        </div>
+      </div>
+    </div>`).join('');
+
+  // API 票源
+  const apis = cfg.sources.map((s, i) => ({ s, i })).filter(({ s }) => s.kind === 'api');
+  $('apiList').innerHTML = apis.length ? apis.map(({ s, i }) => apiCard(s, i)).join('')
+    : '<p class="muted">还没有 API 票源。选一个预设模板新建。</p>';
+}
+
+function apiCard(s, i) {
+  const sp = s.spec || {};
+  const k = keyState.api[s.id] || { set:false, preview:'' };
+  const readyOk = sp.url && sp.body;
+  return `
+  <details class="card api-card" ${readyOk ? '' : 'open'}>
+    <summary><b>${esc(s.label)}</b> <span class="tag">${esc(s.id)}</span>
+      <span class="tag ${readyOk ? 'ok' : 'warn'}">${readyOk ? '已就绪' : '待填必填项'}</span>
+      <span class="tag ${s.enabled !== false ? 'ok' : ''}">${s.enabled !== false ? '参与投票' : '未启用'}</span>
+    </summary>
+    <div style="margin-top:12px">
+      <div class="grid3">
+        <div class="field"><label>显示名</label><input type="text" value="${esc(s.label)}" onchange="updApi(${i},'label',this.value)" /></div>
+        <div class="field"><label>权重</label><input type="number" step="0.1" min="0" max="5" value="${s.weight ?? 1}" onchange="updApi(${i},'weight',Number(this.value))" /></div>
+        <div class="field"><label>批量大小</label><input type="number" min="1" max="40" value="${sp.batchSize || 20}" onchange="setSpec(${i},'batchSize',Number(this.value))" /></div>
+      </div>
+      <div class="grid2" style="margin-top:10px">
+        <div class="field"><label>URL（必填）</label><input type="text" value="${esc(sp.url || '')}" placeholder="https://.../chat/completions" onchange="setSpec(${i},'url',this.value)" /></div>
+        <div class="field"><label>方法</label><select onchange="setSpec(${i},'method',this.value)">
+          ${['POST','GET'].map((m) => `<option ${(sp.method||'POST')===m?'selected':''}>${m}</option>`).join('')}
+        </select></div>
+      </div>
+      <div class="field" style="margin-top:10px"><label>请求头（JSON 对象）</label>
+        <textarea rows="2" onchange="setHeaders(${i},this.value)">${esc(JSON.stringify(sp.headers || {}))}</textarea></div>
+      <div class="grid2" style="margin-top:10px">
+        <div class="field"><label>鉴权头名（留空不注入）</label><input type="text" value="${esc(sp.authHeader || '')}" placeholder="Authorization" onchange="setSpec(${i},'authHeader',this.value)" /></div>
+        <div class="field"><label>鉴权头值</label><input type="text" value="${esc(sp.authValue || '')}" placeholder="Bearer {{key}}" onchange="setSpec(${i},'authValue',this.value)" /></div>
+      </div>
+      <div class="field" style="margin-top:10px"><label>Body 模板（JSON，支持 {{prompt}} {{key}}）</label>
+        <textarea rows="5" onchange="setSpec(${i},'body',this.value)">${esc(sp.body || '')}</textarea></div>
+      <div class="grid2" style="margin-top:10px">
+        <div class="field"><label>答案路径（点号）</label><input type="text" value="${esc(sp.answerPath || '')}" placeholder="choices.0.message.content" onchange="setSpec(${i},'answerPath',this.value)" /></div>
+        <div class="field"><label>响应格式</label><select onchange="setSpec(${i},'format',this.value)">
+          <option value="rows" ${(sp.format||'rows')==='rows'?'selected':''}>rows（批量 [{i,a}]）</option>
+          <option value="single" ${sp.format==='single'?'selected':''}>single（单题答案）</option>
+        </select></div>
+      </div>
+      <div class="keybox">
+        <div class="row">
+          <label class="muted">密钥：${k.set ? '<span class="tag ok">已设置 ' + esc(k.preview) + '</span>' : '<span class="tag warn">未设置</span>'}</label>
+          <input type="text" id="key_${i}" placeholder="粘贴该源的 key（单独存，不写进配置）" style="flex:1;min-width:240px" />
+          <button onclick="saveKey(${i})">保存 key</button>
+          ${k.set ? `<button class="ghost" onclick="clearKey(${i})">清除</button>` : ''}
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;justify-content:space-between">
+        <div class="row">
+          <label class="muted"><input type="checkbox" ${s.enabled !== false ? 'checked' : ''} onchange="updApi(${i},'enabled',this.checked)" /> 启用（参与投票）</label>
+          <button class="ghost" onclick="del(${i})">删除票源</button>
+        </div>
+        <div class="row">
+          <button onclick="testApi(${i})">测试连通</button>
+        </div>
+      </div>
+    </div>
+  </details>`;
+}
+
+function esc(s) { return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+function upd(i, k, v) { cfg.sources[i][k] = v; }
+function updApi(i, k, v) { cfg.sources[i][k] = v; }
+function setSpec(i, k, v) { (cfg.sources[i].spec ||= {}); cfg.sources[i].spec[k] = v; }
+function setHeaders(i, v) {
+  try { cfg.sources[i].spec.headers = JSON.parse(v); }
+  catch { alert('请求头不是合法 JSON，未修改'); render(); }
+}
+
+function del(i) {
+  if (!confirm('删除票源 ' + cfg.sources[i].label + '？（历史票不会删）')) return;
+  cfg.sources.splice(i, 1);
+  render();
+}
+
+function addWeb() {
+  const id = $('newWebId').value.trim();
+  if (!id) return;
+  const label = $('newWebLabel').value.trim() || id;
+  cfg.sources.push({ id, kind: 'web', label, weight: 1, enabled: true, sessions: 1 });
+  render();
+}
+
+function addApiFromPreset() {
+  const p = $('preset').value;
+  if (!p) return;
+  const tpl = PRESETS[p];
+  const id = newId('api:');
+  cfg.sources.push({
+    id, kind: 'api', label: tpl.label, weight: 1, enabled: true,
+    spec: JSON.parse(JSON.stringify(tpl.spec)),
+  });
+  $('preset').value = '';
+  render();
+  alert('已新建 ' + tpl.label + '。填好 URL/Body、保存 key，再点测试连通。');
+}
+
+async function saveKey(i) {
+  const id = cfg.sources[i].id;
+  const v = $('key_' + i).value.trim();
+  if (!v) return alert('请先填入 key');
+  const out = await api('/api/keys', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'api', id, value: v }),
+  });
+  keyState = out;
+  $('key_' + i).value = '';
+  alert('已保存 ' + id + ' 的 key 到独立密钥文件');
+  boot();
+}
+
+async function clearKey(i) {
+  const id = cfg.sources[i].id;
+  if (!confirm('清除 ' + id + ' 的 key？')) return;
+  keyState = await api('/api/keys', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: 'api', id, value: '' }),
+  });
+  boot();
+}
+
+async function testApi(i) {
+  const id = cfg.sources[i].id;
+  const r = await api('/api/api/test', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceId: id }),
+  });
+  alert(JSON.stringify(r, null, 2));
+  boot();
+}
+
+async function pullApis() {
+  await save();
+  const r = await api('/api/api/pull', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  alert(JSON.stringify(r, null, 2));
+  boot();
+}
+
+async function save() {
+  cfg.zerror.mode = $('zmode').value;
+  cfg.zerror.trustAI = $('zai').checked;
+  cfg.zerror.refillThreshold = Number($('zrefill').value) || 20;
+  await api('/api/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sources: cfg.sources, zerror: cfg.zerror }),
+  });
+  alert('已保存配置（密钥不在这份配置里）');
+  boot();
+}
+
+boot();
+</script>
+</body>
+</html>

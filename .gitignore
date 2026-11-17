@@ -1,0 +1,19 @@
+# ===== 隐私数据：题库 / 密钥 / 日志 / 个人配置，永不入库 =====
+data/
+
+# 例外：只把脱敏配置模板纳入版本控制（模板本身放在仓库根目录，见 config.example.json）
+# data/ 整个目录被忽略，keys.json / bank.sqlite* / logs 都不会上传
+
+# Node
+node_modules/
+*.log
+
+# 操作系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 编辑器
+.vscode/
+.idea/
+*.swp

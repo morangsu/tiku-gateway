@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>题库网关</title>
+<link rel="stylesheet" href="/app.css" />
+</head>
+<body>
+<header>
+  <h1>题库网关</h1>
+  <nav>
+    <a href="/" class="on">总览</a>
+    <a href="/export">导出</a>
+    <a href="/import">导入</a>
+    <a href="/review">复核</a>
+    <a href="/sources">票源</a>
+  </nav>
+</header>
+<main>
+  <div id="banners"></div>
+
+  <div class="panel">
+    <h2>概览</h2>
+    <div class="grid" id="stats"></div>
+  </div>
+
+  <div class="panel">
+    <h2>运行设置</h2>
+    <div class="row">
+      <label class="muted">模式</label>
+      <select id="mode">
+        <option value="auto">auto（查到就填，查不到记账）</option>
+        <option value="record">record（只记录，不填）</option>
+        <option value="lookup">lookup（只查，不记录新题）</option>
+      </select>
+      <label class="muted">当前课程</label>
+      <input type="text" id="course" style="width:160px" />
+      <label class="muted">投票阈值</label>
+      <input type="number" id="threshold" step="0.05" min="0.5" max="1" style="width:80px" />
+      <label class="muted">模糊策略</label>
+      <select id="policy">
+        <option value="blank">分歧留空（作业）</option>
+        <option value="top">分歧取最高票（限时考试）</option>
+      </select>
+      <button class="primary" onclick="saveCfg()">保存</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>ZError</h2>
+    <div id="zstate" class="row" style="margin-bottom:10px"></div>
+    <div class="row">
+      <input type="text" id="zkey" placeholder="粘贴 ZError token（Bearer）" style="flex:1;min-width:280px" />
+      <button onclick="saveKey()">保存 token</button>
+      <button onclick="testZ()">测试连通</button>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <label class="muted">当前剩余次数（手动校准）</label>
+      <input type="number" id="zrem" style="width:100px" placeholder="留空=未知" />
+      <button onclick="setRem()">写入</button>
+      <button onclick="pullZ('disputed')">拉取分歧题</button>
+      <button onclick="pullZ('all')">拉取所有未解</button>
+      <span class="muted">接口不返回剩余次数，只能靠这里校准</span>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>本轮</h2>
+    <div class="row" style="margin-bottom:10px">
+      <button class="primary" onclick="newRound()">开始新一轮（收集未解题）</button>
+      <span class="muted">导出前必须先有轮次；同一轮的题号 i 在五家 AI 之间通用</span>
+    </div>
+    <div id="round" class="muted">加载中…</div>
+  </div>
+
+  <div class="panel">
+    <h2>接到 OCS</h2>
+    <p class="muted" style="margin:0 0 8px">OCS → 通用 → 全局设置 → 题库配置，粘贴下面这段（只留这一个题库）：</p>
+    <pre id="ocscfg"></pre>
+    <button style="margin-top:8px" onclick="copyOcs()">复制题库配置</button>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let cfg = {};
+
+async function api(path, opt) {
+  const r = await fetch(path, opt);
+  const t = await r.text();
+  try { return JSON.parse(t); } catch { return { error: t }; }
+}
+
+async function boot() {
+  cfg = await api('/api/config');
+  const s = await api('/api/stats');
+  const z = s.zerror || {};
+
+  $('stats').innerHTML = [
+    ['题目', s.questions], ['票数', s.votes], ['人工答案', s.manual],
+    ['轮次题数', s.round?.total ?? 0], ['存储', s.backend], ['课程', s.course],
+  ].map(([k, v]) => `<div class="stat"><b>${v}</b><span>${k}</span></div>`).join('');
+
+  $('mode').value = cfg.mode;
+  $('course').value = cfg.course;
+  $('threshold').value = cfg.threshold;
+  $('policy').value = cfg.ambiguousPolicy;
+  const ks = await api('/api/keys');
+  $('zkey').value = ks.zerror.set ? ks.zerror.preview + '（已保存）' : '';
+
+  const badges = [];
+  badges.push(z.invalid ? '<span class="tag bad">token 已失效</span>' : '<span class="tag ok">token 可用</span>');
+  badges.push(z.known ? `<span class="tag ${z.remaining < z.refillThreshold ? 'warn' : ''}">剩余 ${z.remaining}</span>` : '<span class="tag">剩余次数未知</span>');
+  badges.push(`<span class="tag">已用 ${z.used}</span>`);
+  badges.push(`<span class="tag">策略 ${z.mode}</span>`);
+  $('zstate').innerHTML = badges.join(' ');
+  $('zrem').value = z.known ? z.remaining : '';
+
+  const banner = [];
+  if (z.invalid) banner.push('<div class="banner bad">ZError 配置已失效：请到 <b>tiku.zerror.cc</b> 登录后重新复制 token（我的→题库配置），粘到下面并保存。</div>');
+  else if (z.known && z.remaining < z.refillThreshold) banner.push(`<div class="banner warn">ZError 剩余 ${z.remaining} 次，低于提醒阈值 ${z.refillThreshold}。分歧题可能拉不完，建议先去领次数，然后在这里校准。</div>`);
+  if (!s.questions) banner.push('<div class="banner warn">库里还没有题目：先在 OCS 里用 auto 模式跑一遍作业。</div>');
+  $('banners').innerHTML = banner.join('');
+
+  const r = await api('/api/round');
+  $('round').innerHTML = r.total
+    ? `轮次 #${r.id} · 共 ${r.total} 题 · ` + Object.entries(r.byType).map(([t, n]) => `${t} ${r.done?.[t] || 0}/${n}`).join(' · ')
+    : '还没有轮次，点上面的按钮开始';
+
+  $('ocscfg').textContent = JSON.stringify([{
+    name: '本地网关',
+    homepage: 'http://127.0.0.1:' + (cfg.port || 8321),
+    url: 'http://127.0.0.1:' + (cfg.port || 8321) + '/query',
+    method: 'post',
+    type: 'GM_xmlhttpRequest',
+    contentType: 'json',
+    data: { title: '${title}', options: '${options}', type: '${type}' },
+    handler: 'return (res)=> res.code===1 ? [res.q,res.a] : undefined'
+  }], null, 2);
+}
+
+async function saveCfg() {
+  cfg = await api('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      mode: $('mode').value,
+      course: $('course').value.trim() || 'default',
+      threshold: Number($('threshold').value),
+      ambiguousPolicy: $('policy').value,
+    }),
+  });
+  boot();
+}
+
+async function saveKey() {
+  const v = $('zkey').value.trim();
+  if (!v || v.includes('…')) return alert('请粘贴完整 token');
+  await api('/api/keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'zerror', id: '', value: v }) });
+  await api('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ zerror: { invalid: false } }) });
+  alert('已保存到独立密钥文件 data/keys.json');
+  boot();
+}
+
+async function testZ() {
+  const r = await api('/api/zerror/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  alert(JSON.stringify(r, null, 2));
+  boot();
+}
+
+async function setRem() {
+  const v = $('zrem').value;
+  await api('/api/zerror/quota', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ remaining: v === '' ? null : Number(v) }) });
+  boot();
+}
+
+async function pullZ(scope) {
+  const r = await api('/api/zerror/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ scope }) });
+  alert(JSON.stringify(r, null, 2));
+  boot();
+}
+
+async function newRound() {
+  const r = await api('/api/round/new', { method: 'POST' });
+  if (!r.total) alert('没有未解的题：要么都答对了，要么库里还没有题');
+  boot();
+}
+
+function copyOcs() {
+  navigator.clipboard.writeText($('ocscfg').textContent);
+  alert('已复制');
+}
+
+boot();
+</script>
+</body>
+</html>
